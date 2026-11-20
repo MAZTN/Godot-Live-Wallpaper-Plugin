@@ -1,9 +1,24 @@
 @tool
 extends EditorPlugin
 
+const WallpaperUtil = preload("live/wallpaper_util.gd")
+const WallpaperRoot = preload("live/wallpaper_root.gd")
+const UpdateChecker = preload("updatecheck.gd")
+
 const DEFAULT_WALLPAPER_PATH := "res://addons/godotLiveWallpaper/assets/wallpaper.png"
 
 const WALLPAPER_IMAGE_FILTER := "*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.tga, *.svg, *.exr, *.hdr"
+const WALLPAPER_SHADER_FILTER := "*.gdshader"
+
+# UI font families, tried in this order until the OS has one of them.
+const FONT_FAMILIES := [
+	"Segoe UI", "SF Pro Text", "Helvetica Neue", "Ubuntu", "Cantarell",
+	"Noto Sans", "DejaVu Sans", "Liberation Sans", "Arial", "sans-serif"
+]
+
+# Wallpaper types, in the order of the "Wallpaper type" option button.
+const LIVE_TYPES := ["auto", "image", "sheet", "shader"]
+const SHADER_PRESETS := ["aurora", "flow", "stars", "hollow_knight"]
 
 const SETTINGS_PREFIX := "godotLiveWallpaper/"
 
@@ -27,7 +42,21 @@ const REFRESH_INTERVAL := 0.4
 # Full rebuild cadence (in refresh ticks) for changed dock layouts.
 const REBUILD_EVERY := 25
 
-var wallpaper_layer: TextureRect
+var wallpaper_layer
+
+var live_type_button: OptionButton
+var live_sheet_box: HBoxContainer
+var live_columns_spin: SpinBox
+var live_rows_spin: SpinBox
+var live_shader_box: HBoxContainer
+var live_shader_preset: OptionButton
+var live_fps_slider: HSlider
+var live_fps_label: Label
+var live_pause_check: CheckBox
+var live_pause_button: Button
+
+var wallpaper_manual_paused := false
+var wallpaper_installed := false
 
 # Root shown by the main screen tab ("📃 Wallpaper").
 var settings_screen: Control
@@ -45,6 +74,18 @@ var script_list_box: VBoxContainer
 var script_list_slider: HSlider
 var script_list_label: Label
 var script_control_count := 0
+
+var script_color_box: VBoxContainer
+var transparency_box: VBoxContainer
+var advanced_box: VBoxContainer
+var developer_check: CheckBox
+var ui_font_bold: Font
+
+var update_checker
+var update_check_timer: Timer
+var update_status_label: Label
+var update_button: Button
+var update_installing := false
 
 var wallpaper_path_edit: LineEdit
 var wallpaper_preview: TextureRect
@@ -68,6 +109,7 @@ var startup_ticks := 0
 var apply_queued := false
 var last_applied_total := -1
 var toolbar_chain_logged := false
+var top_strips_logged := false
 
 
 func _enter_tree() -> void:
@@ -75,6 +117,7 @@ func _enter_tree() -> void:
 
 	_install_settings_screen()
 	_install_refresh_timer()
+	_install_update_checker()
 
 	call_deferred("_install_wallpaper")
 	call_deferred("_queue_transparency_apply")
@@ -89,6 +132,15 @@ func _exit_tree() -> void:
 		refresh_timer = null
 
 	_remove_wallpaper()
+
+	if is_instance_valid(update_check_timer):
+		update_check_timer.stop()
+		update_check_timer.queue_free()
+		update_check_timer = null
+
+	if is_instance_valid(update_checker):
+		update_checker.queue_free()
+		update_checker = null
 
 	if is_instance_valid(wallpaper_dialog):
 		wallpaper_dialog.queue_free()
@@ -148,50 +200,27 @@ func _make_visible(p_visible: bool) -> void:
 func _install_wallpaper() -> void:
 	var editor_root := EditorInterface.get_base_control()
 
-	print_rich(
-		"<yellow><b>[Live Wallpaper] Update available. (<gray>v0.1 <yellow>-> <green>v0.2<yellow>)"
-	)
-
 	if editor_root == null:
 		push_error("[Live Wallpaper] Editor root unavailable.")
 		return
 
-	if wallpaper_layer != null:
+	if is_instance_valid(wallpaper_layer):
 		return
 
-	var path := _get_wallpaper_path()
-	var texture := _load_wallpaper_texture(path)
-
-	if texture == null and path != DEFAULT_WALLPAPER_PATH:
-		push_warning(
-			"[Live Wallpaper] Could not load \"" + path + "\", using the bundled wallpaper."
-		)
-		texture = _load_wallpaper_texture(DEFAULT_WALLPAPER_PATH)
-
-	if texture == null:
-		push_error("[Live Wallpaper] Failed to load wallpaper: " + path)
-		return
-
-	wallpaper_layer = TextureRect.new()
+	wallpaper_layer = WallpaperRoot.new()
 	wallpaper_layer.name = "LiveWallpaperBackground"
-	wallpaper_layer.texture = texture
-
-	wallpaper_layer.set_anchors_and_offsets_preset(
-		Control.PRESET_FULL_RECT
-	)
-
-	wallpaper_layer.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	wallpaper_layer.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-
-	wallpaper_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	wallpaper_layer.focus_mode = Control.FOCUS_NONE
 
 	editor_root.add_child(wallpaper_layer)
 	editor_root.move_child(wallpaper_layer, 0)
 
-	_update_wallpaper_preview(texture)
+	wallpaper_installed = true
 
-	print("[Live Wallpaper] Wallpaper installed: ", path)
+	if not _apply_wallpaper_source():
+		push_error("[Live Wallpaper] No wallpaper could be loaded.")
+		return
+
+	if _developer_mode():
+		print("[Live Wallpaper] Wallpaper installed: ", _get_wallpaper_path())
 
 
 func _remove_wallpaper() -> void:
@@ -199,6 +228,23 @@ func _remove_wallpaper() -> void:
 		wallpaper_layer.queue_free()
 
 	wallpaper_layer = null
+	wallpaper_installed = false
+
+
+func _ensure_wallpaper_layer() -> void:
+	# The dock manager rebuilds the editor UI on layout changes; make sure the
+	# wallpaper node survived instead of silently losing it.
+	if not wallpaper_installed:
+		return
+
+	if is_instance_valid(wallpaper_layer) and wallpaper_layer.is_inside_tree():
+		return
+
+	if is_instance_valid(wallpaper_layer):
+		wallpaper_layer.queue_free()
+
+	wallpaper_layer = null
+	_install_wallpaper()
 
 
 func _get_wallpaper_path() -> String:
@@ -208,32 +254,19 @@ func _get_wallpaper_path() -> String:
 
 
 func _load_wallpaper_texture(path: String) -> Texture2D:
-	if path.is_empty():
-		return null
-
-	# res:// images go through the resource loader so imported textures work.
-	if path.begins_with("res://"):
-		return load(path) as Texture2D
-
-	# Anything else (absolute paths, user://) is read straight from disk, so a
-	# wallpaper does not have to live inside the project.
-	if not FileAccess.file_exists(path):
-		return null
-
-	var image := Image.load_from_file(path)
-
-	if image == null or image.is_empty():
-		return null
-
-	return ImageTexture.create_from_image(image)
+	return WallpaperUtil.load_texture(path)
 
 
 func _apply_wallpaper_path(path: String) -> void:
-	path = path.strip_edges().replace("\\", "/")
+	path = WallpaperUtil.normalize_path(path)
 
+	if path.is_empty():
+		return
+
+	var is_shader := path.to_lower().ends_with(".gdshader")
 	var texture := _load_wallpaper_texture(path)
 
-	if texture == null:
+	if texture == null and not is_shader:
 		push_error("[Live Wallpaper] Failed to load wallpaper: " + path)
 		return
 
@@ -242,14 +275,174 @@ func _apply_wallpaper_path(path: String) -> void:
 	if is_instance_valid(wallpaper_path_edit):
 		wallpaper_path_edit.text = path
 
+	# A shader path is unambiguous, so switch the type instead of trying to
+	# read it as an image.
+	if is_shader:
+		_save_setting("live_type", "shader")
+		_sync_live_type_button()
+
 	if is_instance_valid(wallpaper_layer):
-		wallpaper_layer.texture = texture
+		_apply_wallpaper_source()
 	else:
 		_install_wallpaper()
 
-	_update_wallpaper_preview(texture)
+	if _developer_mode():
+		print("[Live Wallpaper] Wallpaper changed: ", path)
 
-	print("[Live Wallpaper] Wallpaper changed: ", path)
+
+# ---------------------------------------------------------
+# LIVE WALLPAPER SOURCES
+# ---------------------------------------------------------
+
+func _resolve_live_type() -> String:
+	var type := str(_get_setting("live_type", "auto"))
+
+	if type != "auto":
+		return type
+
+	return WallpaperUtil.detect_type(
+		_get_wallpaper_path(),
+		maxi(1, int(_get_setting("live_hframes", 1))),
+		maxi(1, int(_get_setting("live_vframes", 1)))
+	)
+
+
+func _live_type_index(type: String) -> int:
+	var index := LIVE_TYPES.find(type)
+
+	return 0 if index < 0 else index
+
+
+func _build_wallpaper_source() -> Dictionary:
+	return {
+		"type": _resolve_live_type(),
+		"path": _get_wallpaper_path(),
+		"hframes": maxi(1, int(_get_setting("live_hframes", 1))),
+		"vframes": maxi(1, int(_get_setting("live_vframes", 1))),
+		"fps": maxi(1, int(_get_setting("live_fps", 24))),
+		"preset": str(_get_setting("live_shader_preset", "aurora"))
+	}
+
+
+func _apply_wallpaper_source() -> bool:
+	_update_live_control_visibility()
+
+	if not is_instance_valid(wallpaper_layer):
+		return false
+
+	if wallpaper_layer.set_source(_build_wallpaper_source()):
+		_push_wallpaper_state()
+		return true
+
+	# Never leave the editor without a background: fall back to the bundled one.
+	var fallback := {
+		"type": "image",
+		"path": DEFAULT_WALLPAPER_PATH,
+		"fps": 24
+	}
+
+	if wallpaper_layer.set_source(fallback):
+		push_warning(
+			"[Live Wallpaper] Could not use \""
+			+ _get_wallpaper_path()
+			+ "\", showing the bundled wallpaper."
+		)
+		_push_wallpaper_state()
+		return true
+
+	push_error("[Live Wallpaper] Could not load any wallpaper.")
+	return false
+
+
+func _push_wallpaper_state() -> void:
+	if not is_instance_valid(wallpaper_layer):
+		return
+
+	wallpaper_layer.set_fps(maxi(1, int(_get_setting("live_fps", 24))))
+	wallpaper_layer.set_pause_on_blur(
+		bool(_get_setting("live_pause_on_blur", true))
+	)
+	wallpaper_layer.set_paused(wallpaper_manual_paused)
+
+	var texture := _load_wallpaper_texture(_get_wallpaper_path())
+
+	if texture != null:
+		_update_wallpaper_preview(texture)
+
+
+func _update_live_control_visibility() -> void:
+	var type := _resolve_live_type()
+
+	if is_instance_valid(live_sheet_box):
+		live_sheet_box.visible = type == "sheet"
+
+	if is_instance_valid(live_shader_box):
+		live_shader_box.visible = type == "shader"
+
+
+func _update_live_fps_label(value: float) -> void:
+	if is_instance_valid(live_fps_label):
+		live_fps_label.text = "%d fps" % int(round(value))
+
+
+func _sync_live_type_button() -> void:
+	if is_instance_valid(live_type_button):
+		live_type_button.select(
+			_live_type_index(str(_get_setting("live_type", "auto")))
+		)
+
+
+func _on_live_type_changed(index: int) -> void:
+	_save_setting(
+		"live_type",
+		LIVE_TYPES[clampi(index, 0, LIVE_TYPES.size() - 1)]
+	)
+	_apply_wallpaper_source()
+
+
+func _on_sheet_columns_changed(value: float) -> void:
+	_save_setting("live_hframes", maxi(1, int(value)))
+	_apply_wallpaper_source()
+
+
+func _on_sheet_rows_changed(value: float) -> void:
+	_save_setting("live_vframes", maxi(1, int(value)))
+	_apply_wallpaper_source()
+
+
+func _on_shader_preset_changed(index: int) -> void:
+	_save_setting(
+		"live_shader_preset",
+		SHADER_PRESETS[clampi(index, 0, SHADER_PRESETS.size() - 1)]
+	)
+	_apply_wallpaper_source()
+
+
+func _on_live_fps_changed(value: float) -> void:
+	_save_setting("live_fps", maxi(1, int(value)))
+	_update_live_fps_label(value)
+
+	if is_instance_valid(wallpaper_layer):
+		wallpaper_layer.set_fps(maxi(1, int(value)))
+
+
+func _on_pause_on_blur_changed(pressed: bool) -> void:
+	_save_setting("live_pause_on_blur", pressed)
+
+	if is_instance_valid(wallpaper_layer):
+		wallpaper_layer.set_pause_on_blur(pressed)
+
+
+func _on_pause_toggled(pressed: bool) -> void:
+	wallpaper_manual_paused = pressed
+
+	if is_instance_valid(live_pause_button):
+		live_pause_button.text = (
+			"Resume wallpaper" if pressed else "Pause wallpaper"
+		)
+
+	if is_instance_valid(wallpaper_layer):
+		wallpaper_layer.set_paused(pressed)
 
 
 func _update_wallpaper_preview(texture: Texture2D) -> void:
@@ -271,6 +464,12 @@ func _on_browse_wallpaper_pressed() -> void:
 		wallpaper_dialog.file_selected.connect(_on_wallpaper_file_selected)
 		add_child(wallpaper_dialog)
 
+	wallpaper_dialog.clear_filters()
+	wallpaper_dialog.add_filter(WALLPAPER_IMAGE_FILTER)
+
+	if _resolve_live_type() == "shader":
+		wallpaper_dialog.add_filter(WALLPAPER_SHADER_FILTER)
+
 	wallpaper_dialog.popup_centered_ratio(0.6)
 
 
@@ -279,6 +478,8 @@ func _on_wallpaper_file_selected(path: String) -> void:
 
 
 func _on_bundled_wallpaper_pressed() -> void:
+	_save_setting("live_type", "image")
+	_sync_live_type_button()
 	_apply_wallpaper_path(DEFAULT_WALLPAPER_PATH)
 
 
@@ -289,65 +490,218 @@ func _on_bundled_wallpaper_pressed() -> void:
 func _install_settings_screen() -> void:
 	settings_panel = VBoxContainer.new()
 	settings_panel.name = "Live Wallpaper Settings"
-	settings_panel.custom_minimum_size = Vector2(320, 0)
+	settings_panel.custom_minimum_size = Vector2(300, 0)
 	settings_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	settings_panel.add_theme_constant_override("separation", 12)
 
-	var heading := Label.new()
-	heading.text = "📃 Wallpaper"
-	heading.add_theme_font_size_override("font_size", 22)
-	settings_panel.add_child(heading)
+	ui_font_bold = _make_ui_font(700)
 
-	var description := Label.new()
-	description.text = "Wallpaper and transparency settings for the editor."
-	settings_panel.add_child(description)
+	var intro := VBoxContainer.new()
+	intro.add_theme_constant_override("separation", 2)
+	settings_panel.add_child(intro)
 
-	# Wallpaper image.
-	var image_heading := Label.new()
-	image_heading.text = "Wallpaper image"
-	settings_panel.add_child(image_heading)
+	var title := Label.new()
+	title.text = "Make it yours"
+	title.add_theme_font_size_override("font_size", 26)
+
+	if ui_font_bold != null:
+		title.add_theme_font_override("font", ui_font_bold)
+
+	intro.add_child(title)
+	intro.add_child(
+		_make_hint("A wallpaper behind your editor, with panels you can see through.")
+	)
+
+	_build_wallpaper_card()
+	_build_motion_card()
+	_build_panels_card()
+	_build_code_card()
+	_build_updates_card()
+	_build_troubleshooting_card()
+
+	var margin := MarginContainer.new()
+	margin.name = "WallpaperContent"
+	margin.add_theme_constant_override("margin_left", 18)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_right", 18)
+	margin.add_theme_constant_override("margin_bottom", 18)
+	margin.add_child(settings_panel)
+
+	var scroll := ScrollContainer.new()
+	scroll.name = "Wallpaper"
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.add_child(margin)
+	scroll.theme = _make_ui_theme(_make_ui_font(400))
+
+	settings_screen = scroll
+
+	_install_settings_tab()
+
+
+func _build_wallpaper_card() -> void:
+	var card := _add_card(
+		"Wallpaper",
+		"Pick any picture. A file anywhere on your computer works too."
+	)
 
 	wallpaper_preview = TextureRect.new()
-	wallpaper_preview.custom_minimum_size = Vector2(320, 180)
+	wallpaper_preview.custom_minimum_size = Vector2(300, 150)
 	wallpaper_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	wallpaper_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 	wallpaper_preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	settings_panel.add_child(wallpaper_preview)
+	card.add_child(wallpaper_preview)
 
 	var path_row := HBoxContainer.new()
-	settings_panel.add_child(path_row)
+	path_row.add_theme_constant_override("separation", 6)
+	card.add_child(path_row)
 
 	wallpaper_path_edit = LineEdit.new()
 	wallpaper_path_edit.text = _get_wallpaper_path()
-	wallpaper_path_edit.placeholder_text = "res:// or an absolute image path"
+	wallpaper_path_edit.placeholder_text = "res:// or a path on your computer"
+	wallpaper_path_edit.tooltip_text = "Type a path and press Enter to use it."
 	wallpaper_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	wallpaper_path_edit.text_submitted.connect(_on_wallpaper_path_submitted)
 	path_row.add_child(wallpaper_path_edit)
 
 	var browse_button := Button.new()
-	browse_button.text = "Browse…"
+	browse_button.text = "Browse..."
+	browse_button.tooltip_text = "Choose a picture from your computer."
 	browse_button.pressed.connect(_on_browse_wallpaper_pressed)
 	path_row.add_child(browse_button)
 
 	var bundled_button := Button.new()
-	bundled_button.text = "Use bundled wallpaper"
+	bundled_button.text = "Use the bundled wallpaper"
+	bundled_button.tooltip_text = "Go back to the picture that ships with the plugin."
 	bundled_button.pressed.connect(_on_bundled_wallpaper_pressed)
-	settings_panel.add_child(bundled_button)
+	card.add_child(bundled_button)
 
 	_update_wallpaper_preview(_load_wallpaper_texture(_get_wallpaper_path()))
 
-	settings_panel.add_child(HSeparator.new())
 
-	# Master toggle.
+func _build_motion_card() -> void:
+	var card := _add_card(
+		"Movement",
+		"A still picture is fine. Animated ones simply move."
+	)
+
+	var type_row := _add_row(card, "Wallpaper type")
+
+	live_type_button = OptionButton.new()
+	live_type_button.add_item("Auto detect")
+	live_type_button.add_item("Still image")
+	live_type_button.add_item("Sprite sheet")
+	live_type_button.add_item("Shader")
+	live_type_button.select(
+		_live_type_index(str(_get_setting("live_type", "auto")))
+	)
+	live_type_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	live_type_button.item_selected.connect(_on_live_type_changed)
+	type_row.add_child(live_type_button)
+
+	live_sheet_box = HBoxContainer.new()
+	live_sheet_box.add_theme_constant_override("separation", 6)
+	card.add_child(live_sheet_box)
+
+	live_sheet_box.add_child(_make_label("Columns"))
+
+	live_columns_spin = SpinBox.new()
+	live_columns_spin.min_value = 1
+	live_columns_spin.max_value = 64
+	live_columns_spin.step = 1
+	live_columns_spin.value = maxi(1, int(_get_setting("live_hframes", 1)))
+	live_columns_spin.tooltip_text = "How many frames across the sprite sheet."
+	live_columns_spin.value_changed.connect(_on_sheet_columns_changed)
+	live_sheet_box.add_child(live_columns_spin)
+
+	live_sheet_box.add_child(_make_label("Rows"))
+
+	live_rows_spin = SpinBox.new()
+	live_rows_spin.min_value = 1
+	live_rows_spin.max_value = 64
+	live_rows_spin.step = 1
+	live_rows_spin.value = maxi(1, int(_get_setting("live_vframes", 1)))
+	live_rows_spin.tooltip_text = "How many frames down the sprite sheet."
+	live_rows_spin.value_changed.connect(_on_sheet_rows_changed)
+	live_sheet_box.add_child(live_rows_spin)
+
+	live_shader_box = HBoxContainer.new()
+	live_shader_box.add_theme_constant_override("separation", 6)
+	card.add_child(live_shader_box)
+
+	live_shader_box.add_child(_make_label("Effect"))
+
+	live_shader_preset = OptionButton.new()
+	live_shader_preset.add_item("Aurora")
+	live_shader_preset.add_item("Flowing gradient")
+	live_shader_preset.add_item("Starfield")
+	live_shader_preset.select(
+		maxi(
+			0,
+			SHADER_PRESETS.find(str(_get_setting("live_shader_preset", "aurora")))
+		)
+	)
+	live_shader_preset.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	live_shader_preset.item_selected.connect(_on_shader_preset_changed)
+	live_shader_box.add_child(live_shader_preset)
+
+	var speed_row := _add_row(card, "Speed")
+
+	live_fps_slider = HSlider.new()
+	live_fps_slider.min_value = 6
+	live_fps_slider.max_value = 60
+	live_fps_slider.step = 1
+	live_fps_slider.value = maxi(1, int(_get_setting("live_fps", 24)))
+	live_fps_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	live_fps_slider.tooltip_text = "Lower is calmer and lighter on your graphics card."
+	live_fps_slider.value_changed.connect(_on_live_fps_changed)
+	speed_row.add_child(live_fps_slider)
+
+	live_fps_label = Label.new()
+	live_fps_label.custom_minimum_size = Vector2(60, 0)
+	live_fps_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	speed_row.add_child(live_fps_label)
+	_update_live_fps_label(live_fps_slider.value)
+
+	live_pause_check = CheckBox.new()
+	live_pause_check.text = "Pause while I am not using the editor"
+	live_pause_check.button_pressed = bool(_get_setting("live_pause_on_blur", true))
+	live_pause_check.tooltip_text = "Saves power when the editor is in the background."
+	live_pause_check.toggled.connect(_on_pause_on_blur_changed)
+	card.add_child(live_pause_check)
+
+	live_pause_button = Button.new()
+	live_pause_button.text = "Pause wallpaper"
+	live_pause_button.toggle_mode = true
+	live_pause_button.toggled.connect(_on_pause_toggled)
+	card.add_child(live_pause_button)
+
+	card.add_child(
+		_make_hint(
+			"Auto detect looks at the file itself: sprites and shaders move, "
+			+ "everything else stays still."
+		)
+	)
+
+	_update_live_control_visibility()
+
+
+func _build_panels_card() -> void:
+	var card := _add_card(
+		"See-through panels",
+		"Choose how much of the wallpaper shows through the editor."
+	)
+
 	enable_check = CheckBox.new()
-	enable_check.text = "Enable dock transparency"
+	enable_check.text = "Make editor panels see-through"
 	enable_check.button_pressed = _get_setting("enabled", true)
 	enable_check.toggled.connect(_on_enabled_changed)
-	settings_panel.add_child(enable_check)
+	card.add_child(enable_check)
 
-	# Opacity slider.
-	var opacity_heading := Label.new()
-	opacity_heading.text = "Dock opacity"
-	settings_panel.add_child(opacity_heading)
+	transparency_box = VBoxContainer.new()
+	transparency_box.add_theme_constant_override("separation", 6)
+	card.add_child(transparency_box)
+
+	var opacity_row := _add_row(transparency_box, "Solidity")
 
 	opacity_slider = HSlider.new()
 	opacity_slider.min_value = 0
@@ -355,46 +709,51 @@ func _install_settings_screen() -> void:
 	opacity_slider.step = 1
 	opacity_slider.value = _get_setting("opacity", 65)
 	opacity_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	opacity_slider.tooltip_text = "0% shows the wallpaper fully, 100% hides it."
 	opacity_slider.value_changed.connect(_on_opacity_changed)
-	settings_panel.add_child(opacity_slider)
+	opacity_row.add_child(opacity_slider)
 
 	opacity_label = Label.new()
-	settings_panel.add_child(opacity_label)
+	opacity_label.custom_minimum_size = Vector2(60, 0)
+	opacity_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	opacity_row.add_child(opacity_label)
 	_update_opacity_label(opacity_slider.value)
 
-	settings_panel.add_child(HSeparator.new())
+	transparency_box.add_child(_make_section_title("Parts of the editor"))
+	_add_target_checkbox(transparency_box, "Scene Tree", "scene_tree")
+	_add_target_checkbox(transparency_box, "FileSystem", "filesystem")
+	_add_target_checkbox(transparency_box, "Inspector", "inspector")
+	_add_target_checkbox(transparency_box, "Output", "output")
+	_add_target_checkbox(transparency_box, "Top bar and Game view", "main_editor")
 
-	var targets_heading := Label.new()
-	targets_heading.text = "Affected editor areas"
-	settings_panel.add_child(targets_heading)
+	transparency_box.add_child(
+		_make_hint("Untick anything you would rather keep solid.")
+	)
 
-	_add_target_checkbox("Scene Tree", "scene_tree")
-	_add_target_checkbox("FileSystem", "filesystem")
-	_add_target_checkbox("Inspector", "inspector")
-	_add_target_checkbox("Output", "output")
-	_add_target_checkbox("Main Editor", "main_editor")
+	_update_transparency_controls_visibility()
 
-	var hint := Label.new()
-	hint.text = "Main Editor also covers the top toolbar and the Game view."
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.modulate = Color(1, 1, 1, 0.7)
-	settings_panel.add_child(hint)
 
-	settings_panel.add_child(HSeparator.new())
+func _build_code_card() -> void:
+	var card := _add_card("Code editor", "What sits behind your scripts.")
 
-	var script_heading := Label.new()
-	script_heading.text = "Script editor background"
-	settings_panel.add_child(script_heading)
+	var mode_row := _add_row(card, "Background")
 
 	script_mode_button = OptionButton.new()
 	script_mode_button.add_item("Use the wallpaper", SCRIPT_BG_WALLPAPER)
-	script_mode_button.add_item("Custom color", SCRIPT_BG_CUSTOM)
+	script_mode_button.add_item("Solid color", SCRIPT_BG_CUSTOM)
 	script_mode_button.add_item("Editor default", SCRIPT_BG_DEFAULT)
 	script_mode_button.select(
 		int(_get_setting("script_background", SCRIPT_BG_WALLPAPER))
 	)
+	script_mode_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	script_mode_button.item_selected.connect(_on_script_mode_changed)
-	settings_panel.add_child(script_mode_button)
+	mode_row.add_child(script_mode_button)
+
+	script_color_box = VBoxContainer.new()
+	script_color_box.add_theme_constant_override("separation", 4)
+	card.add_child(script_color_box)
+
+	script_color_box.add_child(_make_section_title("Solid color"))
 
 	script_color_button = ColorPickerButton.new()
 	script_color_button.color = _get_setting(
@@ -402,15 +761,15 @@ func _install_settings_screen() -> void:
 		Color(0.11, 0.11, 0.13, 1.0)
 	)
 	script_color_button.edit_alpha = true
+	script_color_button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	script_color_button.color_changed.connect(_on_script_color_changed)
-	settings_panel.add_child(script_color_button)
+	script_color_box.add_child(script_color_button)
 
 	script_list_box = VBoxContainer.new()
-	settings_panel.add_child(script_list_box)
+	script_list_box.add_theme_constant_override("separation", 4)
+	card.add_child(script_list_box)
 
-	var list_heading := Label.new()
-	list_heading.text = "Script list and filter box opacity"
-	script_list_box.add_child(list_heading)
+	var list_row := _add_row(script_list_box, "Script list")
 
 	script_list_slider = HSlider.new()
 	script_list_slider.min_value = 0
@@ -418,36 +777,319 @@ func _install_settings_screen() -> void:
 	script_list_slider.step = 1
 	script_list_slider.value = float(_get_setting("script_list_opacity", 65))
 	script_list_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	script_list_slider.tooltip_text = "How solid the script list and its filter box look."
 	script_list_slider.value_changed.connect(_on_script_list_opacity_changed)
-	script_list_box.add_child(script_list_slider)
+	list_row.add_child(script_list_slider)
 
 	script_list_label = Label.new()
-	script_list_box.add_child(script_list_label)
+	script_list_label.custom_minimum_size = Vector2(60, 0)
+	script_list_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	list_row.add_child(script_list_label)
 	_update_script_list_label(script_list_slider.value)
 
 	_update_script_controls_visibility()
 
+
+func _build_updates_card() -> void:
+	var card := _add_card(
+		"Updates",
+		"Checks GitHub for a newer version of the plugin."
+	)
+
+	update_status_label = _make_hint(
+		"You are on version %s." % _get_plugin_version()
+	)
+	card.add_child(update_status_label)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	card.add_child(row)
+
+	var check_button := Button.new()
+	check_button.text = "Check now"
+	check_button.tooltip_text = "Ask GitHub for the newest version."
+	check_button.pressed.connect(_on_check_updates_pressed)
+	row.add_child(check_button)
+
+	update_button = Button.new()
+	update_button.text = "Install update"
+	update_button.tooltip_text = "Download the newest version into this project."
+	update_button.disabled = true
+	update_button.pressed.connect(_on_install_update_pressed)
+	row.add_child(update_button)
+
+
+func _install_update_checker() -> void:
+	update_checker = UpdateChecker.new()
+	update_checker.name = "UpdateChecker"
+	update_checker.status_changed.connect(_on_update_status_changed)
+	update_checker.install_finished.connect(_on_update_install_finished)
+	add_child(update_checker)
+
+	# Ask once a few seconds after start, so a slow network never delays the
+	# editor from opening.
+	update_check_timer = Timer.new()
+	update_check_timer.name = "UpdateCheckTimer"
+	update_check_timer.one_shot = true
+	update_check_timer.wait_time = 3.0
+	update_check_timer.timeout.connect(_on_update_check_timeout)
+	add_child(update_check_timer)
+	update_check_timer.start()
+
+
+func _developer_mode() -> bool:
+	return bool(_get_setting("developer_mode", false))
+
+
+func _on_developer_mode_changed(pressed: bool) -> void:
+	_save_setting("developer_mode", pressed)
+
+	if is_instance_valid(advanced_box):
+		advanced_box.visible = pressed
+
+
+func _on_update_check_timeout() -> void:
+	if is_instance_valid(update_checker):
+		update_checker.check(_get_plugin_version(), false)
+
+
+func _get_plugin_version() -> String:
+	var config := ConfigFile.new()
+
+	if config.load("res://addons/godotLiveWallpaper/plugin.cfg") != OK:
+		return "unknown"
+
+	return str(config.get_value("plugin", "version", "unknown"))
+
+
+func _on_check_updates_pressed() -> void:
+	if not is_instance_valid(update_checker):
+		return
+
+	if is_instance_valid(update_status_label):
+		update_status_label.text = "Checking for updates..."
+
+	update_checker.check(_get_plugin_version(), true)
+
+
+func _on_install_update_pressed() -> void:
+	if not is_instance_valid(update_checker) or not update_checker.update_available:
+		return
+
+	var dialog := ConfirmationDialog.new()
+	dialog.title = "Install update"
+	dialog.dialog_text = (
+		"Download version %s and replace the plugin files?\n\n"
+		+ "Save your work first: the project has to be reloaded afterwards."
+	) % update_checker.latest_version
+	dialog.confirmed.connect(
+		func() -> void:
+			dialog.queue_free()
+			_start_update_install()
+	)
+	dialog.canceled.connect(dialog.queue_free)
+	add_child(dialog)
+	dialog.popup_centered()
+
+
+func _start_update_install() -> void:
+	update_installing = true
+
+	if is_instance_valid(update_button):
+		update_button.disabled = true
+
+	if is_instance_valid(update_checker):
+		update_checker.install()
+
+
+func _on_update_status_changed(text: String, has_update: bool) -> void:
+	if is_instance_valid(update_status_label):
+		update_status_label.text = text
+		update_status_label.modulate = (
+			Color(1.0, 0.86, 0.35) if has_update else Color(1, 1, 1, 0.62)
+		)
+
+	if is_instance_valid(update_button):
+		update_button.disabled = (
+			update_installing
+			or not is_instance_valid(update_checker)
+			or not update_checker.update_available
+		)
+
+
+func _on_update_install_finished(success: bool, message: String) -> void:
+	update_installing = false
+
+	var color := "green" if success else "red"
+	print_rich("[color=" + color + "][b][Live Wallpaper][/b] " + message + "[/color]")
+
+	if is_instance_valid(update_status_label):
+		update_status_label.text = message
+
+	if not success:
+		if is_instance_valid(update_button):
+			update_button.disabled = false
+
+		return
+
+	EditorInterface.get_resource_filesystem().scan()
+	print_rich(
+		"[color=yellow][b][Live Wallpaper][/b] Reload the project "
+		+ "(Project > Reload Current Project) to finish the update.[/color]"
+	)
+
+
+func _build_troubleshooting_card() -> void:
+	var card := _add_card(
+		"Something looks off?",
+		"Only needed if a panel does not behave."
+	)
+
+	developer_check = CheckBox.new()
+	developer_check.text = "Developer mode"
+	developer_check.button_pressed = _developer_mode()
+	developer_check.tooltip_text = (
+		"Prints wallpaper, transparency and panel details to the Output panel."
+	)
+	developer_check.toggled.connect(_on_developer_mode_changed)
+	card.add_child(developer_check)
+
+	advanced_box = VBoxContainer.new()
+	advanced_box.visible = _developer_mode()
+	advanced_box.add_theme_constant_override("separation", 6)
+	card.add_child(advanced_box)
+
+	advanced_box.add_child(
+		_make_hint(
+			"Writes the background colors the editor uses for each panel "
+			+ "to the Output panel."
+		)
+	)
+
 	var inspect_button := Button.new()
-	inspect_button.text = "Inspect Dock Backgrounds"
+	inspect_button.text = "Inspect panel backgrounds"
 	inspect_button.pressed.connect(_print_stylebox_report)
-	settings_panel.add_child(inspect_button)
+	advanced_box.add_child(inspect_button)
+
+
+func _add_card(title: String, subtitle: String) -> VBoxContainer:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _make_card_style())
+	settings_panel.add_child(panel)
 
 	var margin := MarginContainer.new()
-	margin.name = "WallpaperContent"
-	margin.add_theme_constant_override("margin_left", 24)
-	margin.add_theme_constant_override("margin_top", 20)
-	margin.add_theme_constant_override("margin_right", 24)
-	margin.add_theme_constant_override("margin_bottom", 20)
-	margin.add_child(settings_panel)
+	margin.add_theme_constant_override("margin_left", 14)
+	margin.add_theme_constant_override("margin_top", 12)
+	margin.add_theme_constant_override("margin_right", 14)
+	margin.add_theme_constant_override("margin_bottom", 14)
+	panel.add_child(margin)
 
-	var scroll := ScrollContainer.new()
-	scroll.name = "Wallpaper"
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.add_child(margin)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 8)
+	margin.add_child(column)
 
-	settings_screen = scroll
+	var heading := Label.new()
+	heading.text = title
+	heading.add_theme_font_size_override("font_size", 17)
 
-	_install_settings_tab()
+	if ui_font_bold != null:
+		heading.add_theme_font_override("font", ui_font_bold)
+
+	column.add_child(heading)
+
+	if not subtitle.is_empty():
+		column.add_child(_make_hint(subtitle))
+
+	return column
+
+
+func _add_row(parent: VBoxContainer, text: String) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	parent.add_child(row)
+
+	var label := _make_label(text)
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(label)
+
+	return row
+
+
+func _make_label(text: String) -> Label:
+	var label := Label.new()
+	label.text = text
+	return label
+
+
+func _make_section_title(text: String) -> Label:
+	var label := _make_label(text)
+	label.add_theme_font_size_override("font_size", 13)
+	label.modulate = Color(1, 1, 1, 0.85)
+
+	if ui_font_bold != null:
+		label.add_theme_font_override("font", ui_font_bold)
+
+	return label
+
+
+func _make_hint(text: String) -> Label:
+	var hint := _make_label(text)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.modulate = Color(1, 1, 1, 0.62)
+	return hint
+
+
+# A friendly system font when the OS has one, otherwise the editor font.
+func _make_ui_font(weight: int) -> Font:
+	if not ClassDB.class_exists("SystemFont"):
+		return null
+
+	var font := ClassDB.instantiate("SystemFont") as Font
+
+	if font == null:
+		return null
+
+	font.set("font_names", PackedStringArray(FONT_FAMILIES))
+	font.set("font_weight", weight)
+	font.set("antialiasing", TextServer.FONT_ANTIALIASING_GRAY)
+	return font
+
+
+func _make_ui_theme(body: Font) -> Theme:
+	if body == null:
+		return null
+
+	var ui_theme := Theme.new()
+
+	for type_name in [
+		"Label", "Button", "CheckBox", "OptionButton", "LineEdit",
+		"MenuButton", "LinkButton"
+	]:
+		ui_theme.set_font("font", type_name, body)
+
+	return ui_theme
+
+
+# Cards follow the editor theme, so they read correctly light or dark.
+func _make_card_style() -> StyleBoxFlat:
+	var base := Color(0.15, 0.16, 0.19)
+	var editor_theme := EditorInterface.get_editor_theme()
+
+	if editor_theme != null:
+		var panel_style := editor_theme.get_stylebox("panel", "Panel")
+
+		if panel_style is StyleBoxFlat:
+			base = (panel_style as StyleBoxFlat).bg_color
+
+	var light := base.get_luminance() > 0.5
+	var style := StyleBoxFlat.new()
+	style.bg_color = base.lightened(0.05) if light else base.lightened(0.04)
+	style.border_color = base.darkened(0.10) if light else base.lightened(0.08)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(8)
+	style.anti_aliasing = true
+	return style
 
 
 func _install_settings_tab() -> void:
@@ -534,7 +1176,11 @@ func _fallback_settings_dock() -> void:
 	add_control_to_dock(DOCK_SLOT_RIGHT_UL, settings_screen)
 
 
-func _add_target_checkbox(label_text: String, key: String) -> void:
+func _add_target_checkbox(
+	parent: Control,
+	label_text: String,
+	key: String
+) -> void:
 	var check := CheckBox.new()
 	check.text = label_text
 	check.button_pressed = _get_setting(key, true)
@@ -544,7 +1190,7 @@ func _add_target_checkbox(label_text: String, key: String) -> void:
 	)
 
 	target_checks[key] = check
-	settings_panel.add_child(check)
+	parent.add_child(check)
 
 
 # ---------------------------------------------------------
@@ -553,7 +1199,17 @@ func _add_target_checkbox(label_text: String, key: String) -> void:
 
 func _on_enabled_changed(value: bool) -> void:
 	_save_setting("enabled", value)
+	_update_transparency_controls_visibility()
 	_queue_transparency_apply()
+
+
+func _update_transparency_controls_visibility() -> void:
+	if not is_instance_valid(transparency_box):
+		return
+
+	transparency_box.visible = (
+		is_instance_valid(enable_check) and enable_check.button_pressed
+	)
 
 
 func _on_opacity_changed(value: float) -> void:
@@ -592,8 +1248,8 @@ func _on_script_color_changed(color: Color) -> void:
 func _update_script_controls_visibility() -> void:
 	var mode := int(_get_setting("script_background", SCRIPT_BG_WALLPAPER))
 
-	if is_instance_valid(script_color_button):
-		script_color_button.visible = mode == SCRIPT_BG_CUSTOM
+	if is_instance_valid(script_color_box):
+		script_color_box.visible = mode == SCRIPT_BG_CUSTOM
 
 	# The list opacity only means something while the wallpaper shows through.
 	if is_instance_valid(script_list_box):
@@ -616,7 +1272,7 @@ func _run_queued_transparency() -> void:
 
 
 func _update_opacity_label(value: float) -> void:
-	opacity_label.text = "%d%% opaque" % int(value)
+	opacity_label.text = "%d%%" % int(value)
 
 
 func _get_setting(key: String, default_value: Variant) -> Variant:
@@ -665,6 +1321,8 @@ func _install_refresh_timer() -> void:
 
 
 func _on_refresh_timeout() -> void:
+	_ensure_wallpaper_layer()
+
 	if not is_instance_valid(enable_check) or not enable_check.button_pressed:
 		return
 
@@ -694,9 +1352,9 @@ func _on_refresh_timeout() -> void:
 	# The editor re-applies its own panel styles (the bottom panel does it on
 	# every tab change), which silently throws our override away. Put it back.
 	for entry in applied_styles:
-		var control: Control = entry["control"]
+		var control := _entry_control(entry)
 
-		if not is_instance_valid(control) or not control.is_visible_in_tree():
+		if control == null or not control.is_visible_in_tree():
 			continue
 
 		var style_name: StringName = entry["name"]
@@ -708,9 +1366,9 @@ func _on_refresh_timeout() -> void:
 			)
 
 	for entry in applied_modulates:
-		var control: Control = entry["control"]
+		var control := _entry_control(entry)
 
-		if not is_instance_valid(control) or not control.is_visible_in_tree():
+		if control == null or not control.is_visible_in_tree():
 			continue
 
 		if not control.self_modulate.is_equal_approx(entry["target"] as Color):
@@ -771,6 +1429,9 @@ func _apply_transparency() -> void:
 
 
 func _print_apply_summary(counts: Dictionary) -> void:
+	if not _developer_mode():
+		return
+
 	var total := applied_styles.size() + applied_modulates.size()
 
 	if total == last_applied_total:
@@ -1024,6 +1685,7 @@ func _fade_main_editor(root: Node, opacity: float) -> void:
 		return
 
 	_fade_top_toolbar(root, opacity)
+	_fade_top_strips(root, opacity)
 	_fade_game_view(root, opacity)
 
 
@@ -1051,9 +1713,73 @@ func _fade_top_toolbar(root: Node, opacity: float) -> void:
 			_log_toolbar_chain(control)
 
 
+# The scene tab strip (and the menu bar row under it) paint their own
+# backgrounds above the main screen, outside the toolbar chain, so no class
+# name has to be guessed: they are found by shape - wide, thin and touching
+# the very top of the window.
+func _fade_top_strips(root: Node, opacity: float) -> void:
+	var editor_root := EditorInterface.get_base_control()
+
+	if editor_root == null:
+		return
+
+	var window_width := editor_root.size.x
+
+	for control in _collect_controls(root):
+		if _is_wallpaper_control(control):
+			continue
+
+		var rect := control.get_global_rect()
+
+		if rect.position.y > 16.0:
+			continue
+
+		if rect.size.x < window_width * 0.5:
+			continue
+
+		if rect.size.y > 120.0:
+			continue
+
+		_fade_styleboxes(control, [&"panel", &"tabbar_background"], opacity)
+		_fade_toolbar_ancestors(control, opacity)
+		_log_top_strip(control, rect)
+
+		# The tabs themselves sit on that strip, so they fade with it.
+		if control is TabBar:
+			_fade_styleboxes(
+				control,
+				[&"tab_selected", &"tab_unselected", &"tab_hovered"],
+				opacity
+			)
+
+
+func _log_top_strip(control: Control, rect: Rect2) -> void:
+	# One-shot diagnostic: shows what the top strip is made of.
+	if not _developer_mode() or top_strips_logged:
+		return
+
+	top_strips_logged = true
+
+	print(
+		"[Live Wallpaper] top strip: ",
+		control.get_class(),
+		" | variation=",
+		control.theme_type_variation,
+		" | rect=",
+		rect
+	)
+
+
+func _is_wallpaper_control(control: Control) -> bool:
+	if not is_instance_valid(wallpaper_layer):
+		return false
+
+	return control == wallpaper_layer or wallpaper_layer.is_ancestor_of(control)
+
+
 func _log_toolbar_chain(screen: Control) -> void:
 	# One-shot diagnostic: shows which container paints the toolbar strip.
-	if toolbar_chain_logged:
+	if not _developer_mode() or toolbar_chain_logged:
 		return
 
 	toolbar_chain_logged = true
@@ -1341,7 +2067,7 @@ func _set_stylebox_color(
 
 func _fade_self_modulate(control: Control, opacity: float) -> void:
 	for entry in applied_modulates:
-		if entry["control"] == control:
+		if _entry_control(entry) == control:
 			return
 
 	var original := control.self_modulate
@@ -1357,9 +2083,22 @@ func _fade_self_modulate(control: Control, opacity: float) -> void:
 	control.self_modulate = target
 
 
+# Controls recorded in applied_styles / applied_modulates can be freed by the
+# editor at any time (editing a script rebuilds the script editor), so the
+# stored reference is fetched untyped and checked before it is ever assigned
+# to a typed variable - a freed instance assigned to Control throws.
+func _entry_control(entry: Dictionary) -> Control:
+	var control = entry.get("control")
+
+	if not is_instance_valid(control):
+		return null
+
+	return control as Control
+
+
 func _has_style_entry(control: Control, style_key: StringName) -> bool:
 	for entry in applied_styles:
-		if entry["control"] == control and entry["name"] == style_key:
+		if _entry_control(entry) == control and entry["name"] == style_key:
 			return true
 
 	return false
@@ -1367,9 +2106,9 @@ func _has_style_entry(control: Control, style_key: StringName) -> bool:
 
 func _clear_transparency() -> void:
 	for entry in applied_styles:
-		var control: Control = entry["control"]
+		var control := _entry_control(entry)
 
-		if not is_instance_valid(control):
+		if control == null:
 			continue
 
 		var style_name: StringName = entry["name"]
@@ -1385,9 +2124,9 @@ func _clear_transparency() -> void:
 	applied_styles.clear()
 
 	for entry in applied_modulates:
-		var control: Control = entry["control"]
+		var control := _entry_control(entry)
 
-		if is_instance_valid(control):
+		if control != null:
 			control.self_modulate = entry["original"] as Color
 
 	applied_modulates.clear()
@@ -1425,6 +2164,9 @@ func _find_control(node: Node, predicate: Callable) -> Control:
 # ---------------------------------------------------------
 
 func _print_stylebox_report() -> void:
+	if not _developer_mode():
+		return
+
 	print("\n========== DOCK STYLEBOX REPORT ==========")
 
 	var root := EditorInterface.get_base_control()
@@ -1434,6 +2176,9 @@ func _print_stylebox_report() -> void:
 
 
 func _inspect_styleboxes(node: Node, parent_path: String) -> void:
+	if not _developer_mode():
+		return
+
 	if node is Control:
 		var control := node as Control
 
