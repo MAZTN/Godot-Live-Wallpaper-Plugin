@@ -149,6 +149,7 @@ Godot Live Wallpaper is free, MIT-licensed, and built in my spare time. If it ma
 - 🎨 Share wallpapers, sprite sheets or shader presets you made.
 - 📣 Tell someone who spends too much time staring at a gray editor.
 - 🎮 Support my [game](https://store.steampowered.com/app/4590140/DATACORE_HAYWIRE/)(s) with my team Rainbow Dye Games, we currently have a game coming soon on Steam and any wishlists are greatly appreciated.
+-  And [support my itch.io](https://maztn.itch.io/)
 
 ## Credits
 
