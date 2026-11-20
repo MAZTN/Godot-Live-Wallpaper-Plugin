@@ -133,10 +133,11 @@ Godot Live Wallpaper is free, MIT-licensed, and built in my spare time. If it ma
 
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?logo=github&logoColor=white)](https://github.com/sponsors/MAZTN)
 
+**PayPal** — https://paypal.me/dmpoke
+
 <!-- Add or remove the options you actually use, then delete this comment.
 - **Ko-fi** — https://ko-fi.com/your-handle
 - **Patreon** — https://patreon.com/your-page
-- **PayPal** — https://paypal.me/your-handle
 - **Bitcoin** — `your-btc-address`
 - **Ethereum** — `your-eth-address`
 -->
@@ -147,12 +148,12 @@ Godot Live Wallpaper is free, MIT-licensed, and built in my spare time. If it ma
 - 🐛 Report bugs with the editor version and what you were doing when it happened.
 - 🎨 Share wallpapers, sprite sheets or shader presets you made.
 - 📣 Tell someone who spends too much time staring at a gray editor.
+- 🎮 Support my [game](https://store.steampowered.com/app/4590140/DATACORE_HAYWIRE/)(s) with my team Rainbow Dye Games, we currently have a game coming soon on Steam and any wishlists are greatly appreciated.
 
 ## Credits
 
 - Built by [MAZTN](https://github.com/MAZTN).
-- Bundled artwork and the Hollow Knight–inspired shader are made for this plugin. Hollow Knight is a trademark of Team Cherry; that preset is an original, procedurally generated scene in a similar palette, not game artwork.
-- Thanks to the Godot contributors whose editor theme internals this plugin has to live with.
+- Thanks to the [Godot](https://godotengine.org/) contributors whose editor theme internals this plugin has to live with.
 
 ## License
 
