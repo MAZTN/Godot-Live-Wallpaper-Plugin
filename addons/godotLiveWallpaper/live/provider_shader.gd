@@ -11,11 +11,11 @@ const WallpaperUtil = preload("wallpaper_util.gd")
 const PRESET_AURORA := "aurora"
 const PRESET_FLOW := "flow"
 const PRESET_STARS := "stars"
-const PRESET_HOLLOW_KNIGHT := "hollow_knight"
+const PRESET_SYNTH_WAVE := "synthwave"
 
 # Bundled presets that live in their own file, so they can be edited directly.
 const PRESET_FILES := {
-	PRESET_HOLLOW_KNIGHT: preload("presets/hollow_knight.gdshader")
+	PRESET_SYNTH_WAVE: preload("presets/synthwave.gdshader")
 }
 
 const PRESETS := {

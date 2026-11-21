@@ -9,6 +9,7 @@ extends Node
 #
 # install() downloads the source archive of that version and copies only
 # addons/godotLiveWallpaper/ into the project.
+# This is for anyone that thinks any api calls in this plugin is suspicious. Nope! Just for updates.
 
 signal status_changed(text: String, has_update: bool)
 signal install_finished(success: bool, message: String)
