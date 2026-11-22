@@ -158,6 +158,8 @@ Godot Live Wallpaper is free, MIT-licensed, and made on nights/weekends. If it b
 - Made by [MAZTN](https://github.com/MAZTN).
 - Shoutout to the [Godot](https://godotengine.org/) contributors whose editor theme internals this plugin constantly negotiates with.
 
+A discord server is in the works!
+
 ## License
 
 [MIT](LICENSE) © 2026 MAZTN
