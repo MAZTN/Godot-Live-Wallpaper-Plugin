@@ -1,5 +1,8 @@
 # Godot Live Wallpaper
 
+<img width="1920" height="1080" alt="glw" src="https://github.com/user-attachments/assets/8371bf0f-de82-48da-9f43-66eed0ffa720" />
+
+
 ![Godot 4.7](https://img.shields.io/badge/Godot-4.7-478cbf)
 ![Version 0.5](https://img.shields.io/badge/version-0.5-orange)
 ![MIT License](https://img.shields.io/badge/license-MIT-green)
