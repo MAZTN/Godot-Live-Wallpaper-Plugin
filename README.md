@@ -52,7 +52,7 @@ Hit **Browse...** to pick a file, or type a path and press Enter. Both full disk
 
 **Speed** sets the frame rate (6–60 FPS, default 24). **Pause while I am not using the editor** freezes animation as soon as the editor loses focus so your machine isn't burning cycles in the background.
 
-Built-in shader presets: **Aurora**, **Flowing gradient**, **Starfield**, and **Hollow Knight**. To use your own, pick **Shader**, browse to a `.gdshader` file, or copy one of the presets in `addons/godotLiveWallpaper/live/presets/` as a starting point.
+Built-in shader presets: **Aurora**, **Flowing gradient**, **Starfield**, and **Synthwave**. To use your own, pick **Shader**, browse to a `.gdshader` file, or copy one of the presets in `addons/godotLiveWallpaper/live/presets/` as a starting point.
 
 ### See-through panels
 
