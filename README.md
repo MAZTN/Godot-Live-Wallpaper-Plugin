@@ -162,4 +162,4 @@ Godot Live Wallpaper is free, MIT-licensed, and made on nights/weekends. If it b
 
 [MIT](LICENSE) © 2026 MAZTN
 
-<img width="3427" height="1340" alt="Screenshot 2026-11-20 144952" src="https://github.com/user-attachments/assets/79283d54-8715-4603-b9b9-5070621a8fde" />
+<img width="2932" height="1353" alt="Screenshot 2026-11-20 141801" src="https://github.com/user-attachments/assets/8fba7bcf-53de-43db-9b0a-040367bece93" />
